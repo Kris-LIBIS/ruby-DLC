@@ -206,12 +206,16 @@ module DLC
         return @links
       end
       if url.is_a?(String) and url =~ /^http(s)?\:\/\//
-        response = nil
-        uri = URI.parse(url)
-        Net::HTTP.start(uri.host, uri.port) {|http|
-          response = http.head(uri.path)
-        }
-        @links.push({:url=>url,:filename=>File.basename(uri.path),:size=>response['content-length'].to_i})
+        begin
+          response = nil
+          uri = URI.parse(url)
+          Net::HTTP.start(uri.host, uri.port) {|http|
+            response = http.head(uri.path)
+          }
+          @links.push({:url=>url,:filename=>File.basename(uri.path),:size=>response['content-length'].to_i})
+        rescue
+          @links.push({:url=>url,:filename=>File.basename(uri.path)})
+        end
         return @links
       end
       raise RuntimeError, "Invalid URL: #{url}"

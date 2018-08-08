@@ -345,7 +345,7 @@ module DLC
     
     b64 = DLC.encode(xml)
   
-    cipher = OpenSSL::Cipher::Cipher.new('aes-128-cbc')
+    cipher = OpenSSL::Cipher::new('aes-128-cbc')
     cipher.encrypt
     cipher.iv = key
     cipher.key = key

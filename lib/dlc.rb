@@ -174,6 +174,25 @@ module DLC
       end
     end
   end
+
+  # The DLC container handler class. Make one container and add Packages to them.
+  class Container
+    attr_reader :packages
+
+    def initialize
+      @packages = []
+    end
+
+    def add_package(*pkg)
+      @packages += pkg
+    end
+    alias :add_packages :add_package
+
+    def dlc
+      DLC.dlc(*@packages)
+    end
+
+  end
   
   # The DLC package handler class. Make a new one of these for each package you want to create.
   class Package
@@ -191,14 +210,12 @@ module DLC
     # Experimental reading of DLC files
     def load(dlc)
       dlc = open(dlc).read if !dlc.is_a? String
-      
-      
     end
       
     # Adds a link to the package
     # Will take an array of links too
     # I will, at some point, include the ability to specify filename and size.
-    def add_link(url)
+    def add_link(url, filename = nil, size = nil)
       if url.is_a?(Array)
         url.each do |u|
           self.add_link(u)
@@ -206,7 +223,10 @@ module DLC
         return @links
       end
       if url.is_a?(String) and url =~ /^http(s)?\:\/\//
-        @links.push({:url=>url,:filename=>File.basename(uri.path)})
+        data = {url: url}
+        data[:filename] = filename if filename
+        data[:size] = size.to_i if size
+        @links.push(data)
         return @links
       end
       raise RuntimeError, "Invalid URL: #{url}"
@@ -235,71 +255,7 @@ module DLC
     # Gives you the DLC of the package you've created. First run (every hour) will take longer than the others while
     # the jdownloader service is queried for information.
     def dlc
-      settings = DLC::Settings.new
-      if settings.nil?
-        raise NoGeneratorDetailsError, "You must enter a name, url and email for the generator. See the documentation."
-      end
-      
-      xml = "<dlc>
-      	<header>
-      		<generator>
-      			<app>#{DLC.encode('Ruby DLC API (kedakai)')}</app>
-      			<version>#{DLC.encode(DLC::Api[:version])}</version>
-      			<url>#{DLC.encode(settings.url)}</url>
-      		</generator>
-      		<tribute>
-      			<name>#{DLC.encode(settings.name)}</name>
-      		</tribute>
-      		<dlcxmlversion>#{DLC.encode('20_02_2008')}</dlcxmlversion>
-      	</header>
-      	<content>
-      		<package name=\"#{DLC.encode(@name)}\" comment=\"#{DLC.encode(@comment)}\" category=\"#{DLC.encode(@category)}\" passwords=\"#{DLC.encode(@passwords.collect{|pw| '\"#{pw}\"'}.join(','))}\">
-      		#{@links.collect{|link| "<file><url>#{DLC.encode(link[:url])}</url><filename>#{DLC.encode(link[:filename])}</filename><size>#{DLC.encode(link[:size])}</size></file>"}.join}
-      		</package>
-      	</content>
-      </dlc>"
-      
-      # Lets get a key/encoded key pair
-      begin
-        key, encoded_key = settings.get_keycache
-      rescue NoKeyCachedError
-        # Generate a key
-        expires = 3600
-        key = Digest::MD5.hexdigest(Time.now.to_i.to_s+"GrrrAARRGG!!"+rand(100000).to_s)[0..15]
-        begin
-          res = Net::HTTP.post_form(URI.parse(DLC::Api[:service_urls][rand(DLC::Api[:service_urls].length)]),{
-            :data    => key, # A random key
-            :lid     => DLC.encode([settings.url,settings.email,expires].join("_")), # Details about the generator of the DLC
-            :version => DLC::Api[:version],
-            :client  => "rubydlc"
-          })
-          
-          if res.body =~ /<rc>(.+)<\/rc><rcp>(.+)<\/rcp>$/
-            key = $2
-            encoded_key = $1
-            settings.set_keycache(key, encoded_key, expires)
-          else
-            raise ServerNotRespondingError, "The DLC service is sending a malformed response. I can't make your DLC at the moment."
-          end
-        rescue
-          raise ServerNotRespondingError, "The DLC service is not responding in the expected way. Try again later."
-        end
-      end
-      
-      b64 = DLC.encode(xml)
-      
-      cipher = OpenSSL::Cipher::Cipher.new('aes-128-cbc')
-      cipher.encrypt
-      cipher.iv = key
-      cipher.key = key
-      
-      crypt = cipher.update(
-        b64.ljust((b64.length/16).ceil*16,"\000") # pad to a multiple of 16 bytes, with 0s
-      )
-      
-      crypt << cipher.final
-      
-      DLC.encode(crypt)+encoded_key
+      DLC.dlc(self)
     end
     
     # Gives some useful information when people use the library from irb
@@ -321,5 +277,85 @@ module DLC
   def self.encode(string)
     string = "n.A." if string.nil?
     return [string.to_s].pack("m").gsub("\n","")
+  end
+
+  def self.dlc(*packages)
+    raise RuntimeError, "Should only add DLC::Package objects to the DLC::Container" unless packages.all? {|pkg| pkg.is_a?(DLC::Package)}
+
+    settings = DLC::Settings.new
+    if settings.nil?
+      raise NoGeneratorDetailsError, "You must enter a name, url and email for the generator. See the documentation."
+    end
+    
+    xml = <<~"START_DLC"
+    <dlc>
+      <header>
+        <generator>
+          <app>#{DLC.encode('Ruby DLC API (kedakai)')}</app>
+          <version>#{DLC.encode(DLC::Api[:version])}</version>
+          <url>#{DLC.encode(settings.url)}</url>
+        </generator>
+        <tribute>
+          <name>#{DLC.encode(settings.name)}</name>
+        </tribute>
+        <dlcxmlversion>#{DLC.encode('20_02_2008')}</dlcxmlversion>
+      </header>
+      <content>
+    START_DLC
+
+    packages.each do |pkg|
+      xml += <<~"PKG_DLC"
+          <package name=\"#{DLC.encode(pkg.name)}\" comment=\"#{DLC.encode(pkg.comment)}\" category=\"#{DLC.encode(pkg.category)}\" passwords=\"#{DLC.encode(pkg.passwords.collect{|pw| '\"#{pw}\"'}.join(','))}\">
+      #{pkg.links.collect{|link| "      <file><url>#{DLC.encode(link[:url])}</url><filename>#{DLC.encode(link[:filename])}</filename><size>#{DLC.encode(link[:size])}</size></file>"}.join}
+          </package>
+      PKG_DLC
+    end
+
+    xml += <<~END_DLC
+      </content>
+    </dlc>
+    END_DLC
+     
+    # Lets get a key/encoded key pair
+    begin
+      key, encoded_key = settings.get_keycache
+    rescue NoKeyCachedError
+      # Generate a key
+      expires = 3600
+      key = Digest::MD5.hexdigest(Time.now.to_i.to_s+"GrrrAARRGG!!"+rand(100000).to_s)[0..15]
+      begin
+        res = Net::HTTP.post_form(URI.parse(DLC::Api[:service_urls][rand(DLC::Api[:service_urls].length)]),{
+          :data    => key, # A random key
+          :lid     => DLC.encode([settings.url,settings.email,expires].join("_")), # Details about the generator of the DLC
+          :version => DLC::Api[:version],
+          :client  => "rubydlc"
+        })
+        
+        if res.body =~ /<rc>(.+)<\/rc><rcp>(.+)<\/rcp>$/
+          key = $2
+          encoded_key = $1
+          settings.set_keycache(key, encoded_key, expires)
+        else
+          raise ServerNotRespondingError, "The DLC service is sending a malformed response. I can't make your DLC at the moment."
+        end
+      rescue
+        raise ServerNotRespondingError, "The DLC service is not responding in the expected way. Try again later."
+      end
+    end
+    
+    b64 = DLC.encode(xml)
+  
+    cipher = OpenSSL::Cipher::Cipher.new('aes-128-cbc')
+    cipher.encrypt
+    cipher.iv = key
+    cipher.key = key
+     
+    crypt = cipher.update(
+      b64.ljust((b64.length/16).ceil*16,"\000") # pad to a multiple of 16 bytes, with 0s
+    )
+     
+    crypt << cipher.final
+    
+    DLC.encode(crypt)+encoded_key
   end
 end
